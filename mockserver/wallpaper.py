@@ -13,6 +13,7 @@
 4. 每次播放重启 mpv（约 0.3 秒），比维护 IPC 长连接稳。
 """
 import ctypes
+import json
 import os
 import re
 import subprocess
@@ -43,9 +44,11 @@ user32.RedrawWindow.argtypes = [w.HWND, ctypes.c_void_p, w.HRGN, w.UINT]
 
 VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts"}
 SWP_SHOWWINDOW, SWP_NOACTIVATE, SWP_FRAMECHANGED = 0x0040, 0x0010, 0x0020
+SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER = 0x0001, 0x0002, 0x0004
 GWL_STYLE = -16
 WS_CHILD = 0x40000000
 SW_SHOW = 5
+IPC_PIPE = r"\\.\pipe\olivia-mpv"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -132,6 +135,52 @@ class WallpaperPlayer:
         self.hwnd = None
         self.current = None
         self.lock = threading.Lock()
+        # z-order 看门狗：游戏壁纸窗会不定期把自己顶回 WorkerW 子窗口的最上层，
+        # 把 mpv 埋下去（实测发生过：服务端已 attach 但画面始终是房间场景）。
+        self._watch_until = 0.0
+        self._watch_stop = threading.Event()
+        threading.Thread(target=self._watch_loop, daemon=True).start()
+
+    # ---- IPC（mpv 常驻时无缝换曲） ----
+    def _ipc_cmd(self, obj, timeout=2.0):
+        with open(IPC_PIPE, "r+b", buffering=0) as f:
+            f.write((json.dumps(obj) + "\n").encode())
+            buf = b""
+            end = time.time() + timeout
+            while time.time() < end:
+                b1 = f.read(1)
+                if not b1:
+                    time.sleep(0.01)
+                    continue
+                buf += b1
+                if b1 == b"\n":
+                    break
+            return buf.decode("utf-8", "ignore")
+
+    def _loadfile(self, path, start=0):
+        """常驻 mpv 上换曲：窗口不销毁，桌面画面无缝衔接。失败抛异常走重启路径。"""
+        cmd = {"command": ["loadfile", path, "replace"]}
+        if start and float(start) > 0:
+            cmd["command"].append("start=+%f" % float(start))
+        r1 = self._ipc_cmd(cmd)
+        self._ipc_cmd({"command": ["set", "pause", "no"]})
+        if '"error":"success"' not in r1:
+            raise RuntimeError("loadfile 失败: " + r1[:120])
+
+    def _watch_loop(self):
+        """存活期间持续把 mpv 顶回壁纸层最上面；刚 attach 后的前几秒加密度。"""
+        while not self._watch_stop.is_set():
+            if self.alive and self.hwnd:
+                hot = time.time() < self._watch_until
+                try:
+                    # HWND_TOP(0)：重新插到 Z 序顶部（只在子窗口兄弟之间比较）
+                    user32.SetWindowPos(self.hwnd, 0, 0, 0, 0, 0,
+                                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+                except Exception:
+                    pass
+                self._watch_stop.wait(0.35 if hot else 1.2)
+                continue
+            self._watch_stop.wait(0.6)
 
     def _target_hwnd(self):
         progman = user32.FindWindowW("Progman", None)
@@ -184,7 +233,20 @@ class WallpaperPlayer:
             raise RuntimeError("找不到 mpv.exe（应在 tools/mpv/mpv.exe）")
 
         with self.lock:
-            self._kill()
+            # 首选无缝路径：mpv 还活着就 IPC loadfile，窗口不销毁。
+            # 切歌/拖进度走这里，桌面画面零闪动。
+            if self.alive and self.hwnd:
+                try:
+                    self._loadfile(files[0], start)
+                    self.current = files[0]
+                    self._watch_until = time.time() + 6
+                    return self.hwnd
+                except Exception:
+                    pass  # IPC 失效（管道断/进程假死）→ 落回重启路径
+
+            # 重启路径：先把旧窗口挪出屏幕并唤醒游戏壁纸窗（否则 DWM 会把
+            # 被遮挡窗口的表面丢弃，露出 Windows 系统壁纸——「闪一下系统壁纸」）
+            self._hide_and_kill(wake_once=True)
             time.sleep(0.15)
 
             cmd = [mpv,
@@ -193,6 +255,9 @@ class WallpaperPlayer:
                    "--vo=gpu", "--hwdec=auto-safe",
                    "--really-quiet", "--msg-level=all=error",
                    "--stop-screensaver=no",
+                   # 播完停在最后一帧等下一首（IPC loadfile），不能放完就退出窗口
+                   "--keep-open=yes",
+                   "--input-ipc-server=" + IPC_PIPE,
                    "--geometry=%dx%d+0+0" % (self.sw, self.sh)]
             if start and start > 0:
                 cmd.append("--start=%.1f" % float(start))
@@ -222,6 +287,7 @@ class WallpaperPlayer:
             self.hwnd = hwnd
             self._attach()
             self.current = files[0]
+            self._watch_until = time.time() + 6
             return hwnd
 
     def play_by_name(self, name, start=0):
@@ -287,19 +353,26 @@ class WallpaperPlayer:
             except Exception:
                 pass
 
+    def _hide_and_kill(self, wake_once=False):
+        """体面收尾：先挪出屏幕让下层窗口重新可见，再销毁进程。
+        wake_once=True 时销毁后立刻唤醒一次游戏壁纸窗（重启路径用，
+        避免新 mpv attach 前的空窗露出系统壁纸）。"""
+        if self.hwnd:
+            try:
+                user32.SetWindowPos(self.hwnd, 0, -20000, -20000, 0, 0,
+                                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+                time.sleep(0.4)
+            except Exception:
+                pass
+        self._kill()
+        if wake_once:
+            self._wake_wallpaper()
+
     def stop(self):
         with self.lock:
             # 先把播放窗移出屏幕：游戏壁纸从"被完全遮挡"变成"可见"，DWM 才会重绘它。
             # 直接销毁窗口的话，下层窗口收不到重绘通知，桌面会停在最后一帧甚至黑屏。
-            SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE = 0x0001, 0x0004, 0x0010
-            if self.hwnd:
-                try:
-                    user32.SetWindowPos(self.hwnd, 0, -20000, -20000, 0, 0,
-                                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
-                    time.sleep(0.4)
-                except Exception:
-                    pass
-            self._kill()
+            self._hide_and_kill(wake_once=False)
             for delay in (0.0, 0.3, 0.7):
                 time.sleep(delay)
                 self._wake_wallpaper()

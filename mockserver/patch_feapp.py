@@ -114,14 +114,16 @@ PATCH_HTML = r"""  <script>
       try { var pl = piniaStore("playlist"); if (pl) pl.songProgress = t; } catch (e) {}
     }
     function onEnded() {
-      ambMute(false);
-      wpStop();
       try {
         var pl = piniaStore("playlist");
-        if (!pl) return;
-        pl.songProgress = pl.nowPlayingDuration || tk.dur || 0;
-        // 播单激活时由播单队列接管切歌（顺序/循环/随机）
+        if (!pl) { ambMute(false); wpStop(); return; }
+        // 播单激活时由播单队列接管切歌（顺序/循环/随机）：
+        // 直接 loadfile 下一首，mpv 不销毁，桌面画面无缝衔接；
+        // ambMute 也保持开着（下一首 MV 继续出声）。
         if (olvQueueAdvance(pl)) return;
+        ambMute(false);
+        wpStop();
+        pl.songProgress = pl.nowPlayingDuration || tk.dur || 0;
         pl.handlePlayNext && pl.handlePlayNext();
         // handlePlayNext 找不到下一首时什么都不做、isPlaying 仍是 true ——
         // 但那只是残留状态，等一个 tick 后没有新歌开播就主动收尾。

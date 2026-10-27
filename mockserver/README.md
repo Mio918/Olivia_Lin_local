@@ -54,6 +54,7 @@ py -3.12 patch_webplayer.py --restore
 | 放歌时待机背景音乐不停 | ambience 与 mpv 视频音轨叠加 | 壁纸开播时 `ambientSound.setMuted(true)`，停播/切歌时恢复原状态 |
 | 壁纸层斜向 "10000" 水印 | 水印不在 feapp（其水印已被补丁杀掉），而在原生加载的 webplayer.dat：它的 WatermarkOverlay 从 URL `?uid=` 读值 | `patch_webplayer.py` 往其 index.html 注入 `.watermark-overlay{display:none!important}` |
 | 点播放瞬间闪一下系统壁纸 | 原生收到 sendWebPlayerControlCmd(play) 会立即隐藏自己的壁纸窗口，而 mpv 要 0.3~0.5s 后才 attach（高频截屏实验证实） | 播放命令不再转发原生（`Ct` 只走本地播放器），房间场景一直显示到 mpv 就绪，无缝衔接 |
+| 切歌/待机→播放仍闪系统壁纸 | ① mpv 到文件末尾会**自行退出**（窗口销毁且无唤醒，DWM 丢弃被遮挡游戏壁纸窗的表面 → 露出系统壁纸）；② `/wallpaper/play` 重启 mpv 时走粗暴 `_kill()`（同样无唤醒）；③ 游戏壁纸窗会不定期把自己顶回 WorkerW 最上层，把 mpv 埋下去（服务端已 attach 但画面仍是房间场景） | ① mpv 加 `--keep-open=yes`，播完停在最后一帧；② mpv 常驻 + `--input-ipc-server`，切歌/seek 走 IPC `loadfile`（窗口不销毁，实测换曲 0.07s、零闪动）；③ 所有 kill 路径先挪出屏幕再销毁并唤醒游戏壁纸窗；④ attach 后 z-order 看门狗持续把 mpv 顶回最上层 |
 
 ### 播单功能（2026-10）
 
