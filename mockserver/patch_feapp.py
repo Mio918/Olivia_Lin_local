@@ -73,6 +73,67 @@ PATCH_HTML = r"""  <script>
       setTimeout(function () { clearInterval(iv); }, 15000);
     })();
 
+    // ---- 直驱 pinia store（替代事件桥）----
+    // 上面那层 addEventListener 包装实际上从未生效：QCefView 用 defineProperty
+    // 把 ToyPianistClient.addEventListener 锁成了 writable:false /
+    // configurable:false，对它赋值是静默失败（非严格模式不报错），hs 永远是空的。
+    // 实测结论：timeupdate / ended 从来没送进过 app，进度条恒 0、播完不切歌。
+    // 修法是绕过事件桥直接写 store（以下均已在运行中的页面活体验证过）：
+    //   · playlist.songProgress 是裸 ref，可写 —— 驱动进度条；
+    //   · playlist.handlePlayNext() 等价 app 收到 ended 后的自动切歌；
+    //   · playlist.isPlaying 是 ao() 只读包装，只能读不能写 —— 用它判断
+    //     handlePlayNext 有没有切上歌，没切上（列表播完）就补一个 stopCurrentSong；
+    //   · ambientSound.setMuted(true/false) 控制待机背景音乐（见下）。
+    function piniaStore(id) {
+      try {
+        var el = document.getElementById("app");
+        var gp = el && el.__vue_app__.config.globalProperties;
+        var pin = gp && gp.$pinia;
+        return (pin && pin._s && pin._s.get(id)) || null;
+      } catch (e) { return null; }
+    }
+    // ---- 待机背景音乐联动 ----
+    // 壁纸视频（mpv）带自己的音轨，和 ambience 背景音乐叠在一起。视频开播时
+    // 静音 ambience，停播时恢复原来的静音状态。syncToClient:false 只改本端，
+    // 不回写设置存储（避免把"临时静音"持久化）。
+    var ambSaved = null;
+    function ambMute(on) {
+      try {
+        var amb = piniaStore("ambientSound");
+        if (!amb || typeof amb.setMuted !== "function") return;
+        if (on) {
+          if (ambSaved === null) ambSaved = !!amb.isMuted;
+          if (!amb.isMuted) amb.setMuted(true, { syncToClient: false });
+        } else if (ambSaved !== null) {
+          amb.setMuted(ambSaved, { syncToClient: false });
+          ambSaved = null;
+        }
+      } catch (e) {}
+    }
+    function syncProgress(t) {
+      try { var pl = piniaStore("playlist"); if (pl) pl.songProgress = t; } catch (e) {}
+    }
+    function onEnded() {
+      ambMute(false);
+      wpStop();
+      try {
+        var pl = piniaStore("playlist");
+        if (!pl) return;
+        pl.songProgress = pl.nowPlayingDuration || tk.dur || 0;
+        pl.handlePlayNext && pl.handlePlayNext();
+        // handlePlayNext 找不到下一首时什么都不做、isPlaying 仍是 true ——
+        // 但那只是残留状态，等一个 tick 后没有新歌开播就主动收尾。
+        setTimeout(function () {
+          try {
+            var p2 = piniaStore("playlist");
+            if (p2 && !p2.isPlaying) return; // 已切歌在播
+            // 切歌成功时 isPlaying 会短暂为 true；这里只在"确实没在播"时清场
+            if (p2 && p2.currentNameKey && !p2.isPlaying) p2.stopCurrentSong && p2.stopCurrentSong();
+          } catch (e) {}
+        }, 800);
+      } catch (e) {}
+    }
+
     // ---- 只读探测：让应用自己把「解密后的离线歌单」交出来 ----
     // songlist.dat 是 AES 信封，但原生存着一份解好的；直接向桥接要一次结果，
     // POST 回本地服务落盘。这样不用逆向密钥也能看清曲目结构（字段/URL 形态）。
@@ -333,6 +394,9 @@ PATCH_HTML = r"""  <script>
       var v = w.querySelector("video");
       if (v) { try { v.pause(); v.removeAttribute("src"); v.load(); } catch (e) {} }
       w.parentNode && w.parentNode.removeChild(w);
+      // 页内播放被手动关掉时，驱动器和待机音乐联动也要一起收尾
+      tkStop();
+      ambMute(false);
     }
     function cefPlay(url) {
       try {
@@ -363,7 +427,9 @@ PATCH_HTML = r"""  <script>
         var v = wrap.querySelector("video");
         if (v.getAttribute("src") !== url) { v.src = url; }
         var p = v.play();
-        if (p && p.catch) { p.catch(function () {}); }
+        if (p && p.then) {
+          p.then(function () { ambMute(true); }).catch(function () {});
+        }
       } catch (err) {}
     }
     // 本地播放驱动器：进度条和播放状态只认 "webPlayerControl" 事件，
@@ -380,7 +446,9 @@ PATCH_HTML = r"""  <script>
       tk.t = Math.max(0, Number(from) || 0); tk.dur = Number(dur) || 0;
       tk.iv = setInterval(function () {
         tk.t += 0.5;
-        if (tk.dur && tk.t >= tk.dur) { tkStop(); wpStop(); emitEvt("ended"); return; }
+        // 直驱进度条（事件桥被 QCefView 锁死，见 syncProgress 上方注释）
+        syncProgress(tk.t);
+        if (tk.dur && tk.t >= tk.dur) { tkStop(); onEnded(); return; }
         emitEvt("timeupdate", tk.t);
       }, 500);
     }
@@ -412,7 +480,7 @@ PATCH_HTML = r"""  <script>
     function olvPlayer(e) {
       try {
         var cmd = e && e.cmd, song = e && e.song;
-        if (cmd === "stop" || cmd === "close") { tkStop(); wpStop(); closePlayer(); return; }
+        if (cmd === "stop" || cmd === "close") { tkStop(); ambMute(false); wpStop(); closePlayer(); return; }
         if (cmd === "timeupdate" && e.position != null) {
           // 用户拖进度条：app 已自己更新进度，这里对齐本地播放器并让壁纸跳到同一位置
           tk.t = Number(e.position) || 0;
@@ -428,7 +496,11 @@ PATCH_HTML = r"""  <script>
         tk.key = key;
         var fallback = function () { cefPlay(meta.url); };
         tkStart(0, meta.dur);
-        wpPlay(key, 0).then(function (j) { if (!j || !j.ok) fallback(); }).catch(fallback);
+        wpPlay(key, 0).then(function (j) {
+          if (!j || !j.ok) { fallback(); return; }
+          // 壁纸视频开播：压掉待机背景音乐，避免两路声音叠在一起
+          ambMute(true);
+        }).catch(fallback);
       } catch (err) {}
     }
     window.__olvPlayer = olvPlayer;

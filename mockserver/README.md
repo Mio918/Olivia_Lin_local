@@ -10,7 +10,8 @@ C:\CodeAI\Olivia_Lin\
 │   ├── server.py            服务本体，标准库零依赖
 │   ├── persona.md           人设：改这个就能换她的性格
 │   ├── config.json          模型配置、回信节奏、记忆条数
-│   ├── patch_feapp.py       给客户端打补丁 / 回滚
+│   ├── patch_feapp.py       给客户端打补丁 / 回滚（曲库页 + 播放驱动 + 待机音乐联动）
+│   ├── patch_webplayer.py   去掉壁纸层斜向 UID 水印（webplayer.dat）
 │   ├── START.bat            双击起服务
 │   ├── data\letters.json    信箱数据
 │   └── dist\feapp.dat       生成的补丁包
@@ -29,15 +30,29 @@ py -3.12 server.py --port 8787
 
 # 2. 打补丁（先完全退出游戏，包括托盘）
 py -3.12 patch_feapp.py --api-base http://127.0.0.1:8787 --apply
+py -3.12 patch_webplayer.py --apply        # 壁纸层去 UID 水印
 
-# 3. 启动游戏 → 角色旁边的写信入口
+# 3. 生成曲库封面（从视频抽帧，新导入曲目后重跑即可）
+py -3.12 ..\tools\gen_covers.py
+
+# 4. 启动游戏 → 角色旁边的写信入口
 ```
 
 回滚（第一次 apply 时已自动备份原版 `feapp.dat`）：
 
 ```bash
 py -3.12 patch_feapp.py --restore
+py -3.12 patch_webplayer.py --restore
 ```
+
+### 播放链路的三个修复（2026-10）
+
+| 问题 | 根因 | 修法 |
+| --- | --- | --- |
+| 播放时进度条不动 | `ToyPianistClient.addEventListener` 被 QCefView 用 defineProperty 锁死（writable:false），注入脚本的包装静默失败，timeupdate 进不了 store | 绕过事件桥直驱 pinia：每 0.5s 写 `playlist.songProgress`（裸 ref，可写）；播完调 `handlePlayNext()`，切不动就 `stopCurrentSong()` 收尾 |
+| 曲库/播放条没有封面 | 封面 iconUrl 指向已停服的 CDN | `tools/gen_covers.py` 从视频抽帧生成 `media/<key>/<key>.jpg`，`/catalog` 自动挂上 |
+| 放歌时待机背景音乐不停 | ambience 与 mpv 视频音轨叠加 | 壁纸开播时 `ambientSound.setMuted(true)`，停播/切歌时恢复原状态 |
+| 壁纸层斜向 "10000" 水印 | 水印不在 feapp（其水印已被补丁杀掉），而在原生加载的 webplayer.dat：它的 WatermarkOverlay 从 URL `?uid=` 读值 | `patch_webplayer.py` 往其 index.html 注入 `.watermark-overlay{display:none!important}` |
 
 ## 为什么不能简单关掉离线模式
 
