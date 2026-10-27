@@ -53,6 +53,17 @@ py -3.12 patch_webplayer.py --restore
 | 曲库/播放条没有封面 | 封面 iconUrl 指向已停服的 CDN | `tools/gen_covers.py` 从视频抽帧生成 `media/<key>/<key>.jpg`，`/catalog` 自动挂上 |
 | 放歌时待机背景音乐不停 | ambience 与 mpv 视频音轨叠加 | 壁纸开播时 `ambientSound.setMuted(true)`，停播/切歌时恢复原状态 |
 | 壁纸层斜向 "10000" 水印 | 水印不在 feapp（其水印已被补丁杀掉），而在原生加载的 webplayer.dat：它的 WatermarkOverlay 从 URL `?uid=` 读值 | `patch_webplayer.py` 往其 index.html 注入 `.watermark-overlay{display:none!important}` |
+| 点播放瞬间闪一下系统壁纸 | 原生收到 sendWebPlayerControlCmd(play) 会立即隐藏自己的壁纸窗口，而 mpv 要 0.3~0.5s 后才 attach（高频截屏实验证实） | 播放命令不再转发原生（`Ct` 只走本地播放器），房间场景一直显示到 mpv 就绪，无缝衔接 |
+
+### 播单功能（2026-10）
+
+曲库左侧风格栏「轻音乐」旁边的**我的播单**入口，点开是一个独立的播单管理面板：
+
+- 多个播单，自定义名字（行内编辑），localStorage 持久化（键 `olv_playlists_v1`）
+- 从曲库添加曲目（支持搜索过滤），曲目可上移/下移排序、移出
+- 三种播放模式：**顺序**（播完停）/ **循环**（列表内循环）/ **随机**（随机切歌，不重复当前首）
+- ▶ 播放全部，或从任意一首开始播；正在播放的曲目在面板里高亮
+- 从曲库直接点歌会自动取消播单接管，互不干扰
 
 ## 为什么不能简单关掉离线模式
 

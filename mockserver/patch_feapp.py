@@ -120,6 +120,8 @@ PATCH_HTML = r"""  <script>
         var pl = piniaStore("playlist");
         if (!pl) return;
         pl.songProgress = pl.nowPlayingDuration || tk.dur || 0;
+        // 播单激活时由播单队列接管切歌（顺序/循环/随机）
+        if (olvQueueAdvance(pl)) return;
         pl.handlePlayNext && pl.handlePlayNext();
         // handlePlayNext 找不到下一首时什么都不做、isPlaying 仍是 true ——
         // 但那只是残留状态，等一个 tick 后没有新歌开播就主动收尾。
@@ -489,6 +491,9 @@ PATCH_HTML = r"""  <script>
         }
         if (cmd === "setPlayMode" || cmd === "setVolume" || cmd === "popupWidget") return;
         if (!song) return;
+        // 区分播单发起的播放与曲库直接点播：后者取消播单接管
+        if (window.__olvFromQueue) { window.__olvFromQueue = 0; }
+        else { queue.active = false; }
         var meta = pickMeta(song);
         if (!meta.url) return;
         var mm = /\/media\/([^\/]+)\//.exec(meta.url);
@@ -504,6 +509,421 @@ PATCH_HTML = r"""  <script>
       } catch (err) {}
     }
     window.__olvPlayer = olvPlayer;
+
+    // ================= 播单 =================
+    // 自定义歌单：多播单 / localStorage 持久化 / 顺序·循环·随机三种模式。
+    // 入口挂在曲库左侧风格栏（与「轻音乐」同级）。播单激活时接管 onEnded：
+    // 按模式取下一首 playSonglistItem，顺序模式播完自动停止。
+    var PL_KEY = "olv_playlists_v1";
+    var PL_MODE_LABEL = { seq: "顺序", loop: "循环", rand: "随机" };
+    var pls = plsLoad();
+    var plSelId = null;        // 面板当前选中的播单 id
+    var plAdding = false;      // 面板是否处于「添加曲目」视图
+    var plSearch = "";         // 添加视图的过滤词
+    var queue = { id: null, pos: -1, active: false };
+
+    function plsLoad() {
+      try {
+        var v = JSON.parse(localStorage.getItem(PL_KEY) || "[]");
+        return Array.isArray(v) ? v : [];
+      } catch (e) { return []; }
+    }
+    function plsSave() {
+      try { localStorage.setItem(PL_KEY, JSON.stringify(pls)); } catch (e) {}
+    }
+    function plById(id) {
+      for (var i = 0; i < pls.length; i++) { if (pls[i].id === id) return pls[i]; }
+      return null;
+    }
+    function plUid() {
+      return "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    }
+    function songByKey(key) {
+      var cat = piniaStore("offlineCatalog");
+      var list = (cat && cat.songs) || [];
+      for (var i = 0; i < list.length; i++) { if (list[i].nameKey === key) return list[i]; }
+      return null;
+    }
+
+    // ---- 播放队列 ----
+    // onEnded 里优先调用；返回 true 表示播单已接管（已切下一首或主动收尾）
+    function olvQueueAdvance(pl) {
+      if (!queue.active) return false;
+      var s = qPick();
+      if (!s) {
+        queue.active = false;
+        try { if (pl) pl.stopCurrentSong && pl.stopCurrentSong(); } catch (e) {}
+        return true;
+      }
+      try {
+        window.__olvFromQueue = 1;
+        pl.playSonglistItem(s);
+      } catch (e) { queue.active = false; }
+      return true;
+    }
+    function qPick() {
+      var p = plById(queue.id);
+      if (!p || !p.items.length) return null;
+      var n = p.items.length;
+      if (p.mode === "rand") {
+        if (n === 1) { queue.pos = 0; return songByKey(p.items[0]); }
+        var nx = queue.pos;
+        while (nx === queue.pos) { nx = Math.floor(Math.random() * n); }
+        queue.pos = nx;
+        return songByKey(p.items[nx]);
+      }
+      var np = queue.pos + 1;
+      if (np >= n) {
+        if (p.mode !== "loop") { return null; }   // 顺序模式播完 → 停
+        np = 0;
+      }
+      queue.pos = np;
+      return songByKey(p.items[np]);
+    }
+    function qStart(p, fromIdx) {
+      if (!p || !p.items.length) { return; }
+      var idx = Math.max(0, Math.min(fromIdx || 0, p.items.length - 1));
+      var s = songByKey(p.items[idx]);
+      if (!s) { return; }
+      queue.id = p.id; queue.pos = idx; queue.active = true;
+      var pl = piniaStore("playlist");
+      if (pl) {
+        try { window.__olvFromQueue = 1; pl.playSonglistItem(s); }
+        catch (e) { queue.active = false; }
+      }
+      closePlPanel();
+    }
+
+    // ---- 面板 UI（纯自建 DOM，挂在 body 上，不进 Vue 管理的子树）----
+    var PL_STYLE_ID = "olv-pl-style";
+    function elx(tag, cls, text) {
+      var e = document.createElement(tag);
+      if (cls) { e.className = cls; }
+      if (text != null) { e.textContent = text; }
+      return e;
+    }
+    function plInjectStyle() {
+      if (document.getElementById(PL_STYLE_ID)) { return; }
+      var s = document.createElement("style");
+      s.id = PL_STYLE_ID;
+      s.textContent = [
+        "#olv-pl-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483000;",
+        "  display:flex;align-items:center;justify-content:center}",
+        "#olv-pl-panel{width:760px;max-width:92vw;height:540px;max-height:86vh;background:#1E1E20;",
+        "  border-radius:14px;border:1px solid rgba(255,255,255,.10);color:#FFFBF0;",
+        "  display:flex;flex-direction:column;overflow:hidden;font-size:13px;",
+        "  box-shadow:0 24px 64px rgba(0,0,0,.6)}",
+        ".olv-pl-head{display:flex;align-items:center;gap:10px;padding:14px 16px 10px}",
+        ".olv-pl-title{font-size:15px;font-weight:600;letter-spacing:.06em;flex:1}",
+        ".olv-pl-btn{cursor:pointer;border:1px solid rgba(255,255,255,.14);",
+        "  background:rgba(255,255,255,.06);color:#FFFBF0;border-radius:8px;",
+        "  padding:5px 12px;font-size:12px;line-height:1.4;user-select:none;",
+        "  transition:background .15s,border-color .15s}",
+        ".olv-pl-btn:hover{background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.28)}",
+        ".olv-pl-btn.primary{background:#DCD4CA;color:#28292F;border-color:#DCD4CA;font-weight:500}",
+        ".olv-pl-btn.primary:hover{background:#EBE4DA}",
+        ".olv-pl-body{flex:1;display:flex;min-height:0;border-top:1px solid rgba(255,255,255,.08)}",
+        ".olv-pl-side{width:200px;flex:0 0 auto;border-right:1px solid rgba(255,255,255,.08);",
+        "  overflow-y:auto;padding:8px}",
+        ".olv-pl-main{flex:1;display:flex;flex-direction:column;min-width:0}",
+        ".olv-pl-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;",
+        "  cursor:pointer;color:#DDD;white-space:nowrap;overflow:hidden;user-select:none}",
+        ".olv-pl-item:hover{background:rgba(255,255,255,.07)}",
+        ".olv-pl-item.sel{background:rgba(220,212,202,.16);color:#FFFBF0}",
+        ".olv-pl-item .nm{flex:1;overflow:hidden;text-overflow:ellipsis}",
+        ".olv-pl-item .op{flex:0 0 auto;opacity:.55;font-size:12px;padding:0 4px;border-radius:4px;cursor:pointer}",
+        ".olv-pl-item .op:hover{opacity:1;background:rgba(255,255,255,.14)}",
+        ".olv-pl-tools{display:flex;gap:8px;align-items:center;padding:10px 14px;",
+        "  border-bottom:1px solid rgba(255,255,255,.08);flex-wrap:wrap}",
+        ".olv-pl-list{flex:1;overflow-y:auto;padding:6px 10px}",
+        ".olv-pl-row{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;color:#DDD}",
+        ".olv-pl-row:hover{background:rgba(255,255,255,.07)}",
+        ".olv-pl-row .idx{width:20px;text-align:right;opacity:.5;flex:0 0 auto;font-size:12px}",
+        ".olv-pl-row .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+        ".olv-pl-row .op{flex:0 0 auto;cursor:pointer;opacity:.5;padding:1px 6px;border-radius:4px;font-size:12px;user-select:none}",
+        ".olv-pl-row .op:hover{opacity:1;background:rgba(255,255,255,.14)}",
+        ".olv-pl-row.playing .nm{color:#DCD4CA;font-weight:600}",
+        ".olv-pl-search{flex:1;min-width:140px;background:rgba(255,255,255,.08);",
+        "  border:1px solid rgba(255,255,255,.14);border-radius:8px;color:#FFFBF0;",
+        "  padding:6px 10px;font-size:12px;outline:none}",
+        ".olv-pl-empty{opacity:.45;padding:22px 10px;text-align:center}",
+        ".olv-pl-in{background:rgba(255,255,255,.1);border:0;border-bottom:1px solid #DCD4CA;",
+        "  color:#FFFBF0;font-size:13px;padding:2px 4px;outline:none;width:150px}"
+      ].join("");
+      (document.head || document.documentElement).appendChild(s);
+    }
+    function openPlPanel() {
+      plInjectStyle();
+      var mask = document.getElementById("olv-pl-mask");
+      if (!mask) {
+        mask = elx("div");
+        mask.id = "olv-pl-mask";
+        var p = elx("div");
+        p.id = "olv-pl-panel";
+        mask.appendChild(p);
+        mask.addEventListener("click", function (ev) {
+          if (ev.target === mask) { closePlPanel(); }
+        });
+        document.body.appendChild(mask);
+      }
+      plAdding = false;
+      renderPlPanel();
+    }
+    function closePlPanel() {
+      var m = document.getElementById("olv-pl-mask");
+      if (m && m.parentNode) { m.parentNode.removeChild(m); }
+    }
+    function renderPlPanel() {
+      var p = document.getElementById("olv-pl-panel");
+      if (!p) { return; }
+      p.innerHTML = "";
+      if (!plSelId && pls.length) { plSelId = pls[0].id; }
+
+      // 头部
+      var head = elx("div", "olv-pl-head");
+      head.appendChild(elx("div", "olv-pl-title", "我的播单"));
+      var nb = elx("div", "olv-pl-btn", "＋ 新建播单");
+      nb.onclick = function () {
+        var np = { id: plUid(), name: "播单 " + (pls.length + 1), items: [], mode: "seq" };
+        pls.push(np); plsSave(); plSelId = np.id; plAdding = false; renderPlPanel();
+      };
+      head.appendChild(nb);
+      var xb = elx("div", "olv-pl-btn", "✕");
+      xb.onclick = closePlPanel;
+      head.appendChild(xb);
+      p.appendChild(head);
+
+      var body = elx("div", "olv-pl-body");
+      // 左列：播单列表
+      var side = elx("div", "olv-pl-side");
+      if (!pls.length) {
+        side.appendChild(elx("div", "olv-pl-empty", "还没有播单\n点右上角「＋ 新建播单」"));
+      }
+      for (var i = 0; i < pls.length; i++) {
+        (function (pl) {
+          var it = elx("div", "olv-pl-item" + (pl.id === plSelId ? " sel" : ""));
+          it.appendChild(elx("div", "nm", pl.name + " (" + pl.items.length + ")"));
+          var ren = elx("div", "op", "✎");
+          ren.title = "重命名";
+          ren.onclick = function (ev) {
+            ev.stopPropagation();
+            var inp = document.createElement("input");
+            inp.className = "olv-pl-in";
+            inp.value = pl.name;
+            var nmEl = it.querySelector(".nm");
+            nmEl.innerHTML = "";
+            nmEl.appendChild(inp);
+            inp.focus();
+            inp.select();
+            function done() {
+              var v = inp.value.trim();
+              if (v) { pl.name = v; plsSave(); }
+              renderPlPanel();
+            }
+            inp.addEventListener("keydown", function (e2) {
+              if (e2.key === "Enter") { done(); }
+              if (e2.key === "Escape") { renderPlPanel(); }
+              e2.stopPropagation();
+            });
+            inp.addEventListener("blur", done);
+            inp.addEventListener("click", function (e2) { e2.stopPropagation(); });
+          };
+          it.appendChild(ren);
+          var del = elx("div", "op", "✕");
+          del.title = "删除播单";
+          del.onclick = function (ev) {
+            ev.stopPropagation();
+            for (var k = pls.length - 1; k >= 0; k--) { if (pls[k].id === pl.id) { pls.splice(k, 1); } }
+            if (queue.id === pl.id) { queue.active = false; queue.id = null; }
+            if (plSelId === pl.id) { plSelId = pls.length ? pls[0].id : null; }
+            plsSave(); renderPlPanel();
+          };
+          it.appendChild(del);
+          it.onclick = function () { plSelId = pl.id; plAdding = false; renderPlPanel(); };
+          side.appendChild(it);
+        })(pls[i]);
+      }
+      body.appendChild(side);
+
+      // 右列：选中播单详情
+      var main = elx("div", "olv-pl-main");
+      var cur = plById(plSelId);
+      if (!cur) {
+        main.appendChild(elx("div", "olv-pl-empty", "选择左侧播单，或新建一个"));
+      } else {
+        var tools = elx("div", "olv-pl-tools");
+        if (plAdding) {
+          var back = elx("div", "olv-pl-btn", "‹ 返回");
+          back.onclick = function () { plAdding = false; renderPlPanel(); };
+          tools.appendChild(back);
+          var si = document.createElement("input");
+          si.className = "olv-pl-search";
+          si.placeholder = "搜索曲目名…";
+          si.value = plSearch;
+          si.oninput = function () { plSearch = si.value; renderPlListOnly(); };
+          tools.appendChild(si);
+          var nAvail = 0, ci;
+          for (ci = 0; ci < cur.items.length; ci++) { if (songByKey(cur.items[ci])) { nAvail++; } }
+          tools.appendChild(elx("div", "olv-pl-title", nAvail + " 首在播单中"));
+        } else {
+          var pb = elx("div", "olv-pl-btn primary", "▶ 播放全部");
+          pb.onclick = function () { qStart(cur, 0); };
+          tools.appendChild(pb);
+          var mb = elx("div", "olv-pl-btn", "模式：" + (PL_MODE_LABEL[cur.mode] || cur.mode));
+          mb.onclick = function () {
+            cur.mode = cur.mode === "seq" ? "loop" : (cur.mode === "loop" ? "rand" : "seq");
+            plsSave(); renderPlPanel();
+          };
+          tools.appendChild(mb);
+          var ab = elx("div", "olv-pl-btn", "＋ 添加曲目");
+          ab.onclick = function () { plAdding = true; renderPlPanel(); };
+          tools.appendChild(ab);
+          tools.appendChild(elx("div", "olv-pl-title", cur.name + " · " + cur.items.length + " 首"));
+        }
+        main.appendChild(tools);
+        var list = elx("div", "olv-pl-list");
+        list.id = "olv-pl-list";
+        if (plAdding) { renderAddList(list, cur); }
+        else { renderPlList(list, cur); }
+        main.appendChild(list);
+      }
+      body.appendChild(main);
+      p.appendChild(body);
+    }
+    // 添加视图的搜索：只重绘列表不重建输入框（避免丢焦点）
+    function renderPlListOnly() {
+      var list = document.getElementById("olv-pl-list");
+      var cur = plById(plSelId);
+      if (!list || !cur) { return; }
+      list.innerHTML = "";
+      renderAddList(list, cur);
+    }
+    function renderAddList(list, cur) {
+      var cat = piniaStore("offlineCatalog");
+      var songs = (cat && cat.songs) || [];
+      var kw = (plSearch || "").toLowerCase();
+      var shown = 0;
+      for (var i = 0; i < songs.length; i++) {
+        (function (s) {
+          var nm = s.name || s.nameKey || "";
+          if (kw && nm.toLowerCase().indexOf(kw) < 0) { return; }
+          shown++;
+          var row = elx("div", "olv-pl-row");
+          row.appendChild(elx("div", "idx", ""));
+          row.appendChild(elx("div", "nm", nm));
+          var pos = cur.items.indexOf(s.nameKey);
+          var op;
+          if (pos >= 0) {
+            op = elx("div", "op", "✓ 已加入");
+            op.title = "点击移出播单";
+            op.onclick = function () {
+              cur.items.splice(pos, 1); plsSave(); renderPlListOnly();
+            };
+          } else {
+            op = elx("div", "op", "＋ 加入");
+            op.onclick = function () {
+              cur.items.push(s.nameKey); plsSave(); renderPlListOnly();
+            };
+          }
+          row.appendChild(op);
+          list.appendChild(row);
+        })(songs[i]);
+      }
+      if (!shown) { list.appendChild(elx("div", "olv-pl-empty", "没有匹配的曲目")); }
+    }
+    function renderPlList(list, cur) {
+      if (!cur.items.length) {
+        list.appendChild(elx("div", "olv-pl-empty", "播单还是空的\n点上方「＋ 添加曲目」从曲库挑选"));
+        return;
+      }
+      for (var i = 0; i < cur.items.length; i++) {
+        (function (idx) {
+          var key = cur.items[idx];
+          var s = songByKey(key);
+          var row = elx("div", "olv-pl-row");
+          var isCur = queue.active && queue.id === cur.id && queue.pos === idx;
+          if (isCur) { row.className += " playing"; }
+          row.appendChild(elx("div", "idx", String(idx + 1)));
+          row.appendChild(elx("div", "nm", (s && s.name) || key + "（曲库中未找到）"));
+          var play = elx("div", "op", "▶");
+          play.title = "从这首开始播放";
+          play.onclick = function () { qStart(cur, idx); };
+          row.appendChild(play);
+          if (idx > 0) {
+            var up = elx("div", "op", "↑");
+            up.title = "上移";
+            up.onclick = function () {
+              var t = cur.items[idx - 1]; cur.items[idx - 1] = cur.items[idx]; cur.items[idx] = t;
+              if (queue.id === cur.id) {
+                if (queue.pos === idx) { queue.pos = idx - 1; }
+                else if (queue.pos === idx - 1) { queue.pos = idx; }
+              }
+              plsSave(); renderPlPanel();
+            };
+            row.appendChild(up);
+          }
+          if (idx < cur.items.length - 1) {
+            var dn = elx("div", "op", "↓");
+            dn.title = "下移";
+            dn.onclick = function () {
+              var t = cur.items[idx + 1]; cur.items[idx + 1] = cur.items[idx]; cur.items[idx] = t;
+              if (queue.id === cur.id) {
+                if (queue.pos === idx) { queue.pos = idx + 1; }
+                else if (queue.pos === idx + 1) { queue.pos = idx; }
+              }
+              plsSave(); renderPlPanel();
+            };
+            row.appendChild(dn);
+          }
+          var rm = elx("div", "op", "✕");
+          rm.title = "移出播单";
+          rm.onclick = function () {
+            cur.items.splice(idx, 1);
+            if (queue.id === cur.id) {
+              if (queue.pos === idx) { queue.active = false; queue.pos = -1; }
+              else if (queue.pos > idx) { queue.pos--; }
+            }
+            plsSave(); renderPlPanel();
+          };
+          row.appendChild(rm);
+          list.appendChild(row);
+        })(i);
+      }
+    }
+
+    // ---- 曲库风格栏入口：与「轻音乐」同级的「我的播单」----
+    // Vue 列表会随筛选重建，所以用定时器检查，被删掉就重插。
+    var PL_ENTRY_ID = "olv-pl-entry";
+    function mountPlEntry() {
+      try {
+        var menu = null;
+        var items = document.querySelectorAll(".tp-el-menu-item");
+        for (var i = 0; i < items.length; i++) {
+          var t = (items[i].innerText || "").trim();
+          if (t === "轻音乐" || t === "流行" || t === "全部") { menu = items[i].parentNode; break; }
+        }
+        if (!menu) { return; }
+        var exist = document.getElementById(PL_ENTRY_ID);
+        if (exist) {
+          if (exist.parentNode === menu) { return; }
+          if (exist.parentNode) { exist.parentNode.removeChild(exist); }
+        }
+        var li = elx("li", "tp-el-menu-item tp-menu-item text-title-m h-fit h-");
+        li.id = PL_ENTRY_ID;
+        li.appendChild(elx("div", "h-5.5 mb-2 font-medium", "我的播单"));
+        li.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          ev.preventDefault();
+          openPlPanel();
+        });
+        var ref = null;
+        for (var j = 0; j < menu.children.length; j++) {
+          if ((menu.children[j].innerText || "").trim() === "轻音乐") { ref = menu.children[j]; break; }
+        }
+        if (ref && ref.nextSibling) { menu.insertBefore(li, ref.nextSibling); }
+        else { menu.appendChild(li); }
+      } catch (e) {}
+    }
 
     function pollCmd() {
       fetch(BASE + "/probe/poll", { cache: "no-store" })
@@ -537,6 +957,8 @@ PATCH_HTML = r"""  <script>
 
     setTimeout(function () { report("boot"); }, 1500);
     setInterval(mountNav, 1200);
+    setInterval(mountPlEntry, 1200);
+    setTimeout(mountPlEntry, 3000);
   })();
   </script>
 """
@@ -675,14 +1097,17 @@ MAIN_REPLACEMENTS = [
         'u=j(()=>!1)',
     ),
     (
-        # 停服后原生不再创建播放视图，sendWebPlayerControlCmd 发出去只有一行 JSON
-        # 日志、没有后续动作。这里在发原生命令的同时，把同一份数据交给注入脚本里的
-        # 本地播放器（window.__olvPlayer），于是点播放真的能出画面。
-        # 原生那侧照旧调用，将来若恢复也不冲突。
-        "播放时同时驱动本地播放器",
+        # 播放命令只走本地播放器，不再转发原生。
+        # 原生播放器已死，sendWebPlayerControlCmd 发过去唯一的"效果"是
+        # LiteUIController 立即隐藏原生壁纸窗口（露出 Windows 系统壁纸），
+        # 而我们的 mpv 要 0.3~0.5s 后才 attach 上来 —— 用户看到的就是
+        # 「待机房间场景 → 闪一下系统壁纸 → 进入 MV」。不转发后，
+        # 房间场景一直显示到 mpv 就绪，视觉上无缝衔接。
+        # 停服前原生命令也只是打一行 JSON 日志，无其他消费方，可安全去掉。
+        "播放命令只走本地播放器（不再转发原生，避免壁纸窗口被提前隐藏）",
         'Ct=e=>We({action:"sendWebPlayerControlCmd",data:e})',
         'Ct=e=>{try{window.__olvPlayer&&window.__olvPlayer(e)}catch(olvErr){}'
-        'return We({action:"sendWebPlayerControlCmd",data:e})}',
+        'return Promise.resolve({})}',
     ),
 ]
 
