@@ -513,32 +513,57 @@ PATCH_HTML = r"""  <script>
     window.__olvPlayer = olvPlayer;
 
     // ================= 播单 =================
-    // 自定义歌单：多播单 / localStorage 持久化 / 顺序·循环·随机三种模式。
-    // 入口挂在曲库左侧风格栏（与「轻音乐」同级）。播单激活时接管 onEnded：
-    // 按模式取下一首 playSonglistItem，顺序模式播完自动停止。
-    var PL_KEY = "olv_playlists_v1";
+    // 单一播单：真身存 mockserver（data/playlist.json），曲库行内的原生「加播单」
+    // 按钮走 /addToPlaylist 直接进这份列表；本面板与原生播放单页读同一份。
+    // 本地只维护播放队列状态（播到第几首、是否接管 onEnded）与面板视图状态。
+    // 播单激活时接管 onEnded：按模式取下一首 playSonglistItem，顺序模式播完自动停止。
     var PL_MODE_LABEL = { seq: "顺序", loop: "循环", rand: "随机" };
-    var pls = plsLoad();
-    var plSelId = null;        // 面板当前选中的播单 id
+    var plItems = [];          // [{itemId, itemType, nameKey, name}]，来自服务端
+    var plMode = "seq";
+    var plLoaded = false;
     var plAdding = false;      // 面板是否处于「添加曲目」视图
     var plSearch = "";         // 添加视图的过滤词
-    var queue = { id: null, pos: -1, active: false };
+    var queue = { pos: -1, active: false };
 
-    function plsLoad() {
+    function plFetch() {
+      return fetch(BASE + "/searchPlaylist", { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          var d = (j && j.data) || {};
+          var lst = d.list || [];
+          plItems = lst.map(function (s) {
+            return {
+              itemId: s.itemId != null ? s.itemId : s.nameKey,
+              itemType: s.itemType,
+              nameKey: s.nameKey || s.itemId,
+              name: s.name || s.nameKey || "",
+            };
+          });
+          if (d.mode) { plMode = d.mode; }
+          plLoaded = true;
+          return plItems;
+        })
+        .catch(function () { return plItems; });
+    }
+    function plSaveItems() {
       try {
-        var v = JSON.parse(localStorage.getItem(PL_KEY) || "[]");
-        return Array.isArray(v) ? v : [];
-      } catch (e) { return []; }
+        fetch(BASE + "/playlist/update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            items: plItems.map(function (x) { return { itemType: x.itemType, itemId: x.itemId }; }),
+          }),
+        });
+      } catch (e) {}
     }
-    function plsSave() {
-      try { localStorage.setItem(PL_KEY, JSON.stringify(pls)); } catch (e) {}
-    }
-    function plById(id) {
-      for (var i = 0; i < pls.length; i++) { if (pls[i].id === id) return pls[i]; }
-      return null;
-    }
-    function plUid() {
-      return "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    function plSaveMode() {
+      try {
+        fetch(BASE + "/playlist/update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: plMode }),
+        });
+      } catch (e) {}
     }
     function songByKey(key) {
       var cat = piniaStore("offlineCatalog");
@@ -548,46 +573,48 @@ PATCH_HTML = r"""  <script>
     }
 
     // ---- 播放队列 ----
-    // onEnded 里优先调用；返回 true 表示播单已接管（已切下一首或主动收尾）
+    // onEnded 里优先调用；返回 true 表示播单已接管（已切下一首或主动收尾）。
+    // 切歌前重新拉一次列表：用户在曲库用原生按钮加减曲目后这里立刻生效。
     function olvQueueAdvance(pl) {
       if (!queue.active) return false;
-      var s = qPick();
-      if (!s) {
-        queue.active = false;
-        try { if (pl) pl.stopCurrentSong && pl.stopCurrentSong(); } catch (e) {}
-        return true;
-      }
-      try {
-        window.__olvFromQueue = 1;
-        pl.playSonglistItem(s);
-      } catch (e) { queue.active = false; }
+      plFetch().then(function () {
+        var s = qPick();
+        if (!s) {
+          queue.active = false;
+          try { if (pl) pl.stopCurrentSong && pl.stopCurrentSong(); } catch (e) {}
+          return;
+        }
+        try {
+          window.__olvFromQueue = 1;
+          pl.playSonglistItem(s);
+        } catch (e) { queue.active = false; }
+      });
       return true;
     }
     function qPick() {
-      var p = plById(queue.id);
-      if (!p || !p.items.length) return null;
-      var n = p.items.length;
-      if (p.mode === "rand") {
-        if (n === 1) { queue.pos = 0; return songByKey(p.items[0]); }
+      var n = plItems.length;
+      if (!n) return null;
+      if (plMode === "rand") {
+        if (n === 1) { queue.pos = 0; return songByKey(plItems[0].nameKey); }
         var nx = queue.pos;
         while (nx === queue.pos) { nx = Math.floor(Math.random() * n); }
         queue.pos = nx;
-        return songByKey(p.items[nx]);
+        return songByKey(plItems[nx].nameKey);
       }
       var np = queue.pos + 1;
       if (np >= n) {
-        if (p.mode !== "loop") { return null; }   // 顺序模式播完 → 停
+        if (plMode !== "loop") { return null; }   // 顺序模式播完 → 停
         np = 0;
       }
       queue.pos = np;
-      return songByKey(p.items[np]);
+      return songByKey(plItems[np].nameKey);
     }
-    function qStart(p, fromIdx) {
-      if (!p || !p.items.length) { return; }
-      var idx = Math.max(0, Math.min(fromIdx || 0, p.items.length - 1));
-      var s = songByKey(p.items[idx]);
+    function qStart(fromIdx) {
+      if (!plItems.length) { return; }
+      var idx = Math.max(0, Math.min(fromIdx || 0, plItems.length - 1));
+      var s = songByKey(plItems[idx].nameKey);
       if (!s) { return; }
-      queue.id = p.id; queue.pos = idx; queue.active = true;
+      queue.pos = idx; queue.active = true;
       var pl = piniaStore("playlist");
       if (pl) {
         try { window.__olvFromQueue = 1; pl.playSonglistItem(s); }
@@ -611,7 +638,7 @@ PATCH_HTML = r"""  <script>
       s.textContent = [
         "#olv-pl-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483000;",
         "  display:flex;align-items:center;justify-content:center}",
-        "#olv-pl-panel{width:760px;max-width:92vw;height:540px;max-height:86vh;background:#1E1E20;",
+        "#olv-pl-panel{width:560px;max-width:92vw;height:540px;max-height:86vh;background:#1E1E20;",
         "  border-radius:14px;border:1px solid rgba(255,255,255,.10);color:#FFFBF0;",
         "  display:flex;flex-direction:column;overflow:hidden;font-size:13px;",
         "  box-shadow:0 24px 64px rgba(0,0,0,.6)}",
@@ -624,17 +651,6 @@ PATCH_HTML = r"""  <script>
         ".olv-pl-btn:hover{background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.28)}",
         ".olv-pl-btn.primary{background:#DCD4CA;color:#28292F;border-color:#DCD4CA;font-weight:500}",
         ".olv-pl-btn.primary:hover{background:#EBE4DA}",
-        ".olv-pl-body{flex:1;display:flex;min-height:0;border-top:1px solid rgba(255,255,255,.08)}",
-        ".olv-pl-side{width:200px;flex:0 0 auto;border-right:1px solid rgba(255,255,255,.08);",
-        "  overflow-y:auto;padding:8px}",
-        ".olv-pl-main{flex:1;display:flex;flex-direction:column;min-width:0}",
-        ".olv-pl-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;",
-        "  cursor:pointer;color:#DDD;white-space:nowrap;overflow:hidden;user-select:none}",
-        ".olv-pl-item:hover{background:rgba(255,255,255,.07)}",
-        ".olv-pl-item.sel{background:rgba(220,212,202,.16);color:#FFFBF0}",
-        ".olv-pl-item .nm{flex:1;overflow:hidden;text-overflow:ellipsis}",
-        ".olv-pl-item .op{flex:0 0 auto;opacity:.55;font-size:12px;padding:0 4px;border-radius:4px;cursor:pointer}",
-        ".olv-pl-item .op:hover{opacity:1;background:rgba(255,255,255,.14)}",
         ".olv-pl-tools{display:flex;gap:8px;align-items:center;padding:10px 14px;",
         "  border-bottom:1px solid rgba(255,255,255,.08);flex-wrap:wrap}",
         ".olv-pl-list{flex:1;overflow-y:auto;padding:6px 10px}",
@@ -648,9 +664,7 @@ PATCH_HTML = r"""  <script>
         ".olv-pl-search{flex:1;min-width:140px;background:rgba(255,255,255,.08);",
         "  border:1px solid rgba(255,255,255,.14);border-radius:8px;color:#FFFBF0;",
         "  padding:6px 10px;font-size:12px;outline:none}",
-        ".olv-pl-empty{opacity:.45;padding:22px 10px;text-align:center}",
-        ".olv-pl-in{background:rgba(255,255,255,.1);border:0;border-bottom:1px solid #DCD4CA;",
-        "  color:#FFFBF0;font-size:13px;padding:2px 4px;outline:none;width:150px}"
+        ".olv-pl-empty{opacity:.45;padding:22px 10px;text-align:center;white-space:pre-line}"
       ].join("");
       (document.head || document.documentElement).appendChild(s);
     }
@@ -670,6 +684,7 @@ PATCH_HTML = r"""  <script>
       }
       plAdding = false;
       renderPlPanel();
+      plFetch().then(renderPlPanel);   // 每次打开都同步服务端最新列表（原生按钮加的也能看到）
     }
     function closePlPanel() {
       var m = document.getElementById("olv-pl-mask");
@@ -679,128 +694,60 @@ PATCH_HTML = r"""  <script>
       var p = document.getElementById("olv-pl-panel");
       if (!p) { return; }
       p.innerHTML = "";
-      if (!plSelId && pls.length) { plSelId = pls[0].id; }
 
-      // 头部
+      // 头部：标题带首数
+      var cnt = 0;
+      for (var c = 0; c < plItems.length; c++) { if (songByKey(plItems[c].nameKey)) cnt++; }
       var head = elx("div", "olv-pl-head");
-      head.appendChild(elx("div", "olv-pl-title", "我的播单"));
-      var nb = elx("div", "olv-pl-btn", "＋ 新建播单");
-      nb.onclick = function () {
-        var np = { id: plUid(), name: "播单 " + (pls.length + 1), items: [], mode: "seq" };
-        pls.push(np); plsSave(); plSelId = np.id; plAdding = false; renderPlPanel();
-      };
-      head.appendChild(nb);
+      head.appendChild(elx("div", "olv-pl-title", "我的播单 · " + cnt + " 首"));
       var xb = elx("div", "olv-pl-btn", "✕");
       xb.onclick = closePlPanel;
       head.appendChild(xb);
       p.appendChild(head);
 
-      var body = elx("div", "olv-pl-body");
-      // 左列：播单列表
-      var side = elx("div", "olv-pl-side");
-      if (!pls.length) {
-        side.appendChild(elx("div", "olv-pl-empty", "还没有播单\n点右上角「＋ 新建播单」"));
-      }
-      for (var i = 0; i < pls.length; i++) {
-        (function (pl) {
-          var it = elx("div", "olv-pl-item" + (pl.id === plSelId ? " sel" : ""));
-          it.appendChild(elx("div", "nm", pl.name + " (" + pl.items.length + ")"));
-          var ren = elx("div", "op", "✎");
-          ren.title = "重命名";
-          ren.onclick = function (ev) {
-            ev.stopPropagation();
-            var inp = document.createElement("input");
-            inp.className = "olv-pl-in";
-            inp.value = pl.name;
-            var nmEl = it.querySelector(".nm");
-            nmEl.innerHTML = "";
-            nmEl.appendChild(inp);
-            inp.focus();
-            inp.select();
-            function done() {
-              var v = inp.value.trim();
-              if (v) { pl.name = v; plsSave(); }
-              renderPlPanel();
-            }
-            inp.addEventListener("keydown", function (e2) {
-              if (e2.key === "Enter") { done(); }
-              if (e2.key === "Escape") { renderPlPanel(); }
-              e2.stopPropagation();
-            });
-            inp.addEventListener("blur", done);
-            inp.addEventListener("click", function (e2) { e2.stopPropagation(); });
-          };
-          it.appendChild(ren);
-          var del = elx("div", "op", "✕");
-          del.title = "删除播单";
-          del.onclick = function (ev) {
-            ev.stopPropagation();
-            for (var k = pls.length - 1; k >= 0; k--) { if (pls[k].id === pl.id) { pls.splice(k, 1); } }
-            if (queue.id === pl.id) { queue.active = false; queue.id = null; }
-            if (plSelId === pl.id) { plSelId = pls.length ? pls[0].id : null; }
-            plsSave(); renderPlPanel();
-          };
-          it.appendChild(del);
-          it.onclick = function () { plSelId = pl.id; plAdding = false; renderPlPanel(); };
-          side.appendChild(it);
-        })(pls[i]);
-      }
-      body.appendChild(side);
-
-      // 右列：选中播单详情
-      var main = elx("div", "olv-pl-main");
-      var cur = plById(plSelId);
-      if (!cur) {
-        main.appendChild(elx("div", "olv-pl-empty", "选择左侧播单，或新建一个"));
+      // 工具行
+      var tools = elx("div", "olv-pl-tools");
+      if (plAdding) {
+        var back = elx("div", "olv-pl-btn", "‹ 返回");
+        back.onclick = function () { plAdding = false; renderPlPanel(); };
+        tools.appendChild(back);
+        var si = document.createElement("input");
+        si.className = "olv-pl-search";
+        si.placeholder = "搜索曲目名…";
+        si.value = plSearch;
+        si.oninput = function () { plSearch = si.value; renderPlListOnly(); };
+        tools.appendChild(si);
+        tools.appendChild(elx("div", "olv-pl-title", cnt + " 首在播单中"));
       } else {
-        var tools = elx("div", "olv-pl-tools");
-        if (plAdding) {
-          var back = elx("div", "olv-pl-btn", "‹ 返回");
-          back.onclick = function () { plAdding = false; renderPlPanel(); };
-          tools.appendChild(back);
-          var si = document.createElement("input");
-          si.className = "olv-pl-search";
-          si.placeholder = "搜索曲目名…";
-          si.value = plSearch;
-          si.oninput = function () { plSearch = si.value; renderPlListOnly(); };
-          tools.appendChild(si);
-          var nAvail = 0, ci;
-          for (ci = 0; ci < cur.items.length; ci++) { if (songByKey(cur.items[ci])) { nAvail++; } }
-          tools.appendChild(elx("div", "olv-pl-title", nAvail + " 首在播单中"));
-        } else {
-          var pb = elx("div", "olv-pl-btn primary", "▶ 播放全部");
-          pb.onclick = function () { qStart(cur, 0); };
-          tools.appendChild(pb);
-          var mb = elx("div", "olv-pl-btn", "模式：" + (PL_MODE_LABEL[cur.mode] || cur.mode));
-          mb.onclick = function () {
-            cur.mode = cur.mode === "seq" ? "loop" : (cur.mode === "loop" ? "rand" : "seq");
-            plsSave(); renderPlPanel();
-          };
-          tools.appendChild(mb);
-          var ab = elx("div", "olv-pl-btn", "＋ 添加曲目");
-          ab.onclick = function () { plAdding = true; renderPlPanel(); };
-          tools.appendChild(ab);
-          tools.appendChild(elx("div", "olv-pl-title", cur.name + " · " + cur.items.length + " 首"));
-        }
-        main.appendChild(tools);
-        var list = elx("div", "olv-pl-list");
-        list.id = "olv-pl-list";
-        if (plAdding) { renderAddList(list, cur); }
-        else { renderPlList(list, cur); }
-        main.appendChild(list);
+        var pb = elx("div", "olv-pl-btn primary", "▶ 播放全部");
+        pb.onclick = function () { qStart(0); };
+        tools.appendChild(pb);
+        var mb = elx("div", "olv-pl-btn", "模式：" + (PL_MODE_LABEL[plMode] || plMode));
+        mb.onclick = function () {
+          plMode = plMode === "seq" ? "loop" : (plMode === "loop" ? "rand" : "seq");
+          plSaveMode(); renderPlPanel();
+        };
+        tools.appendChild(mb);
+        var ab = elx("div", "olv-pl-btn", "＋ 添加曲目");
+        ab.onclick = function () { plAdding = true; renderPlPanel(); };
+        tools.appendChild(ab);
       }
-      body.appendChild(main);
-      p.appendChild(body);
+      p.appendChild(tools);
+
+      var list = elx("div", "olv-pl-list");
+      list.id = "olv-pl-list";
+      if (plAdding) { renderAddList(list); }
+      else { renderPlList(list); }
+      p.appendChild(list);
     }
     // 添加视图的搜索：只重绘列表不重建输入框（避免丢焦点）
     function renderPlListOnly() {
       var list = document.getElementById("olv-pl-list");
-      var cur = plById(plSelId);
-      if (!list || !cur) { return; }
+      if (!list) { return; }
       list.innerHTML = "";
-      renderAddList(list, cur);
+      renderAddList(list);
     }
-    function renderAddList(list, cur) {
+    function renderAddList(list) {
       var cat = piniaStore("offlineCatalog");
       var songs = (cat && cat.songs) || [];
       var kw = (plSearch || "").toLowerCase();
@@ -813,18 +760,27 @@ PATCH_HTML = r"""  <script>
           var row = elx("div", "olv-pl-row");
           row.appendChild(elx("div", "idx", ""));
           row.appendChild(elx("div", "nm", nm));
-          var pos = cur.items.indexOf(s.nameKey);
+          // 与原生「加播单」按钮一致：itemId 优先用曲目的 id
+          var itemId = (s.id != null && s.id !== "") ? s.id : s.nameKey;
+          var pos = -1;
+          for (var k = 0; k < plItems.length; k++) {
+            if (String(plItems[k].itemId) === String(itemId)) { pos = k; break; }
+          }
           var op;
           if (pos >= 0) {
             op = elx("div", "op", "✓ 已加入");
             op.title = "点击移出播单";
             op.onclick = function () {
-              cur.items.splice(pos, 1); plsSave(); renderPlListOnly();
+              plItems.splice(pos, 1);
+              plSaveItems();
+              renderPlListOnly();
             };
           } else {
             op = elx("div", "op", "＋ 加入");
             op.onclick = function () {
-              cur.items.push(s.nameKey); plsSave(); renderPlListOnly();
+              plItems.push({ itemId: itemId, itemType: s.itemType || "song", nameKey: s.nameKey || itemId, name: nm });
+              plSaveItems();
+              renderPlListOnly();
             };
           }
           row.appendChild(op);
@@ -833,59 +789,52 @@ PATCH_HTML = r"""  <script>
       }
       if (!shown) { list.appendChild(elx("div", "olv-pl-empty", "没有匹配的曲目")); }
     }
-    function renderPlList(list, cur) {
-      if (!cur.items.length) {
-        list.appendChild(elx("div", "olv-pl-empty", "播单还是空的\n点上方「＋ 添加曲目」从曲库挑选"));
+    function renderPlList(list) {
+      if (!plItems.length) {
+        list.appendChild(elx("div", "olv-pl-empty", "播单还是空的\n在曲库里点曲目后面的「加播单」，或点上方「＋ 添加曲目」"));
         return;
       }
-      for (var i = 0; i < cur.items.length; i++) {
+      for (var i = 0; i < plItems.length; i++) {
         (function (idx) {
-          var key = cur.items[idx];
-          var s = songByKey(key);
+          var it = plItems[idx];
+          var s = songByKey(it.nameKey);
           var row = elx("div", "olv-pl-row");
-          var isCur = queue.active && queue.id === cur.id && queue.pos === idx;
-          if (isCur) { row.className += " playing"; }
+          if (queue.active && queue.pos === idx) { row.className += " playing"; }
           row.appendChild(elx("div", "idx", String(idx + 1)));
-          row.appendChild(elx("div", "nm", (s && s.name) || key + "（曲库中未找到）"));
+          row.appendChild(elx("div", "nm", (s && s.name) || it.name || (it.nameKey + "（曲库中未找到）")));
           var play = elx("div", "op", "▶");
           play.title = "从这首开始播放";
-          play.onclick = function () { qStart(cur, idx); };
+          play.onclick = function () { qStart(idx); };
           row.appendChild(play);
           if (idx > 0) {
             var up = elx("div", "op", "↑");
             up.title = "上移";
             up.onclick = function () {
-              var t = cur.items[idx - 1]; cur.items[idx - 1] = cur.items[idx]; cur.items[idx] = t;
-              if (queue.id === cur.id) {
-                if (queue.pos === idx) { queue.pos = idx - 1; }
-                else if (queue.pos === idx - 1) { queue.pos = idx; }
-              }
-              plsSave(); renderPlPanel();
+              var t = plItems[idx - 1]; plItems[idx - 1] = plItems[idx]; plItems[idx] = t;
+              if (queue.pos === idx) { queue.pos = idx - 1; }
+              else if (queue.pos === idx - 1) { queue.pos = idx; }
+              plSaveItems(); renderPlPanel();
             };
             row.appendChild(up);
           }
-          if (idx < cur.items.length - 1) {
+          if (idx < plItems.length - 1) {
             var dn = elx("div", "op", "↓");
             dn.title = "下移";
             dn.onclick = function () {
-              var t = cur.items[idx + 1]; cur.items[idx + 1] = cur.items[idx]; cur.items[idx] = t;
-              if (queue.id === cur.id) {
-                if (queue.pos === idx) { queue.pos = idx + 1; }
-                else if (queue.pos === idx + 1) { queue.pos = idx; }
-              }
-              plsSave(); renderPlPanel();
+              var t = plItems[idx + 1]; plItems[idx + 1] = plItems[idx]; plItems[idx] = t;
+              if (queue.pos === idx) { queue.pos = idx + 1; }
+              else if (queue.pos === idx + 1) { queue.pos = idx; }
+              plSaveItems(); renderPlPanel();
             };
             row.appendChild(dn);
           }
           var rm = elx("div", "op", "✕");
           rm.title = "移出播单";
           rm.onclick = function () {
-            cur.items.splice(idx, 1);
-            if (queue.id === cur.id) {
-              if (queue.pos === idx) { queue.active = false; queue.pos = -1; }
-              else if (queue.pos > idx) { queue.pos--; }
-            }
-            plsSave(); renderPlPanel();
+            plItems.splice(idx, 1);
+            if (queue.pos === idx) { queue.active = false; queue.pos = -1; }
+            else if (queue.pos > idx) { queue.pos--; }
+            plSaveItems(); renderPlPanel();
           };
           row.appendChild(rm);
           list.appendChild(row);
@@ -961,6 +910,21 @@ PATCH_HTML = r"""  <script>
     setInterval(mountNav, 1200);
     setInterval(mountPlEntry, 1200);
     setTimeout(mountPlEntry, 3000);
+    // 启动时拉一次播单；若服务端为空且旧版 localStorage 里有数据，迁移过去
+    plFetch().then(function (items) {
+      if (items.length) { return; }
+      try {
+        var old = JSON.parse(localStorage.getItem("olv_playlists_v1") || "[]");
+        if (old.length && old[0] && old[0].items && old[0].items.length) {
+          plItems = old[0].items.map(function (k) {
+            return { itemId: k, itemType: "song", nameKey: k, name: k };
+          });
+          plSaveItems();
+          report("playlist-migrated", { count: plItems.length });
+        }
+        localStorage.removeItem("olv_playlists_v1");
+      } catch (e) {}
+    });
   })();
   </script>
 """

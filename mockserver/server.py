@@ -274,6 +274,45 @@ def _write_store(data: dict) -> None:
     os.replace(tmp, LETTER_FILE)
 
 
+# ---------- 播单（单一播单，真身存 data/playlist.json） ----------
+# 曲库行内的原生「加播单」按钮走 /addToPlaylist 写这里；播放单页与注入脚本的
+# 播单面板都通过 /searchPlaylist 读同一份。条目只存 {itemType, itemId}，
+# 展示时用本地曲库把 itemId 解析回完整曲目元数据。
+PLAYLIST_FILE = os.path.join(DATA_DIR, "playlist.json")
+
+
+def _playlist_read() -> dict:
+    try:
+        with open(PLAYLIST_FILE, "r", encoding="utf-8") as f:
+            v = json.load(f)
+        if isinstance(v, dict) and isinstance(v.get("items"), list):
+            v.setdefault("mode", "seq")
+            return v
+    except Exception:
+        pass
+    return {"items": [], "mode": "seq"}
+
+
+def _playlist_write(pl: dict) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = PLAYLIST_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(pl, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, PLAYLIST_FILE)
+
+
+def _song_by_item(item_id, catalog_songs: list):
+    """itemId → 曲目。目录曲目的 id / songId / nameKey 三个字段都可能被当作 itemId 传上来。"""
+    for s in catalog_songs:
+        if s.get("nameKey") == item_id:
+            return s
+        if "id" in s and str(s.get("id")) == str(item_id):
+            return s
+        if s.get("songId") is not None and str(s.get("songId")) == str(item_id):
+            return s
+    return None
+
+
 def _today() -> str:
     return time.strftime("%Y-%m-%d")
 
@@ -716,7 +755,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True, "bytes": len(raw)})
 
     # ---------- 本地曲库 ----------
-    def _catalog(self) -> None:
+    def _catalog_payload(self) -> dict:
         """把 media/ 目录扫成客户端认识的歌单结构。
 
         客户端原本从原生桥 getOfflineSongList 拿 songlist.dat（AES）解密后的 JSON，
@@ -727,6 +766,7 @@ class Handler(BaseHTTPRequestHandler):
             整条套用原版元数据（曲名/演奏者/乐评/波形），只把地址换成本地文件；
           · 对不上的 → 当本地导入曲目，尽量从同名 .json 里取信息。
         播放走的是 <video src>，没有 DRM。
+        /catalog（HTTP 入口）与 /searchPlaylist（播单解析）共用本函数。
         """
         base = PUBLIC_BASE
         official = _load_official()
@@ -869,6 +909,11 @@ class Handler(BaseHTTPRequestHandler):
             "musicStyles": list(style_seen.values()),
             "performanceModes": list(modes.values()),
         }
+        return payload
+
+    def _catalog(self) -> None:
+        payload = self._catalog_payload()
+        songs = payload["songs"]
         print(f"[catalog] {len(songs)} 首（原版 {sum(1 for s in songs if s.get('source')=='official')}）", flush=True)
         return self._json({"data": json.dumps(payload, ensure_ascii=False)})
 
@@ -1027,7 +1072,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self._ok({"questions": []})
             if route == "/getSongStats":
                 return self._ok({"playCount": 0, "performCount": 0})
-            if route in ("/searchSongs", "/searchPlaylist", "/searchPerformances", "/searchUserSongs"):
+            # 播单页/面板拉列表：itemId 解析回完整曲目元数据；mode 一起带回
+            if route == "/searchPlaylist":
+                pl = _playlist_read()
+                songs = self._catalog_payload()["songs"]
+                lst = []
+                for it in pl["items"]:
+                    s = _song_by_item(it.get("itemId"), songs)
+                    if not s:
+                        continue
+                    row = dict(s)
+                    row["itemType"] = it.get("itemType")
+                    row["itemId"] = it.get("itemId")
+                    row["id"] = it.get("itemId")
+                    row["performanceId"] = ""
+                    lst.append(row)
+                return self._ok({
+                    "list": lst, "hasMore": False, "nextCursor": 0,
+                    "total": len(lst), "mode": pl.get("mode", "seq"),
+                })
+            if route in ("/searchSongs", "/searchPerformances", "/searchUserSongs"):
                 return self._ok({"list": [], "hasMore": False, "total": 0, "nextCursor": 0})
             if route == "/midi/listJobs":
                 return self._ok({"list": [], "hasMore": False, "nextCursor": 0, "total": 0})
@@ -1078,6 +1142,50 @@ class Handler(BaseHTTPRequestHandler):
                 return self._ok({"status": 2})
             if route == "/createFeedback":
                 return self._ok({"ok": True})
+            # 原生「加播单」按钮（曲库行内）：加入单一播单，重复添加幂等
+            if route == "/addToPlaylist":
+                item_id = body.get("itemId")
+                if item_id is None or item_id == "":
+                    return self._err("itemId 缺失")
+                with _lock:
+                    pl = _playlist_read()
+                    dup = any(str(x.get("itemId")) == str(item_id) for x in pl["items"])
+                    if not dup:
+                        pl["items"].append({"itemType": body.get("itemType"), "itemId": item_id})
+                        _playlist_write(pl)
+                print(f"[playlist] + {item_id}（共 {len(pl['items'])}）", flush=True)
+                return self._ok({
+                    "itemId": item_id, "itemType": body.get("itemType"),
+                    "songId": item_id if str(item_id).isdigit() else "",
+                    "performanceId": "",
+                })
+            if route == "/delFromPlaylist":
+                item_id = body.get("itemId")
+                with _lock:
+                    pl = _playlist_read()
+                    before = len(pl["items"])
+                    pl["items"] = [x for x in pl["items"] if str(x.get("itemId")) != str(item_id)]
+                    _playlist_write(pl)
+                print(f"[playlist] - {item_id}（{before} → {len(pl['items'])}）", flush=True)
+                return self._ok({"ok": True})
+            # 播单面板专用：整表重排 / 播放模式。items 元素可以是纯 itemId，
+            # 也可以是 {itemType, itemId} 对象（面板全量同步时用）。
+            if route == "/playlist/update":
+                with _lock:
+                    pl = _playlist_read()
+                    if isinstance(body.get("items"), list):
+                        new_items = []
+                        for it in body["items"]:
+                            if isinstance(it, dict) and it.get("itemId") is not None:
+                                new_items.append({"itemType": it.get("itemType"), "itemId": it["itemId"]})
+                            elif it is not None and it != "":
+                                new_items.append({"itemType": None, "itemId": it})
+                        pl["items"] = new_items
+                    if body.get("mode") in ("seq", "loop", "rand"):
+                        pl["mode"] = body["mode"]
+                    _playlist_write(pl)
+                print(f"[playlist] update mode={pl['mode']} count={len(pl['items'])}", flush=True)
+                return self._ok({"ok": True, "mode": pl["mode"], "count": len(pl["items"])})
             if route == "/genObjectUploadUrl":
                 return self._ok({"url": "", "key": "", "headers": {}, "exist": False})
             if route == "/generateShareToken":
