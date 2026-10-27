@@ -1,0 +1,24 @@
+# 曲库媒体（官方预渲染视频，不入库）
+mockserver/media/
+
+# 运行日志与缓存
+*.log
+__pycache__/
+*.pyc
+
+# 补丁产物（由 patch_feapp.py 从游戏本体生成，可复现）
+mockserver/dist/
+
+# 解包的游戏前端源码（版权资产，不入库）
+feapp_unpacked/
+analysis/webplayer/
+
+# 第三方运行时（122M，见 README 下载说明）
+tools/mpv/
+
+# 本地工作区数据
+.workbuddy/
+mockserver/data/letters.json
+
+# 含 API Key 的真实配置（提交 config.example.json 模板）
+mockserver/config.json

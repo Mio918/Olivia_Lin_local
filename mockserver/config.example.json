@@ -1,0 +1,20 @@
+{
+  "port": 8787,
+  "daily_letter_limit": 3,
+  "reply_delay_min_minutes": 30,
+  "uid": "",
+  "reply_delay_max_minutes": 120,
+  "reply_resend_delay_minutes": 2,
+  "reply_delay_seconds": 0,
+  "display_name": "林离",
+  "persona_file": "persona.md",
+  "llm": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "model": "deepseek-chat",
+    "timeout": 45,
+    "temperature": 0.9,
+    "max_tokens": 900,
+    "history_letters": 6
+  }
+}

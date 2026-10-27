@@ -1,0 +1,308 @@
+{
+  "app": {
+    "name": "BSide: Olivia Lin",
+    "steam_appid": "4532590",
+    "version": "0.0.9.627",
+    "client": "ToyPianist-win-x64-rel-v0.0.9.627",
+    "frontend_build": "beta_cn_b776ad35_455e162",
+    "render": "ovilia_Win64_Development_15918",
+    "game_biz": "toy_cn",
+    "app_id": "falmx90w5slc"
+  },
+  "origins": {
+    "remote_feapp": "https://toy-cnbeta01.olivia.miyoushe.com/feapp/index.html",
+    "remote_webplayer": "https://toy-cnbeta01.olivia.miyoushe.com/webplayer/index.html",
+    "local_mapping": "https://olivia.local/",
+    "passport": "https://passport-api.miyoushe.com",
+    "user_center": "https://user.miyoushe.com"
+  },
+  "bridge": {
+    "query_channel": {
+      "js_entry": "window.cefViewQuery({request,onSuccess,onFailure})",
+      "native_entry": "QCefView::cefQueryRequest / 'cefViewQuery'",
+      "request_shape": {
+        "action": "string",
+        "data": "object"
+      },
+      "actions": [
+        "cancelDownloadTasks",
+        "cancelSongDownload",
+        "checkLocalMedia",
+        "checkLocalSongs",
+        "checkSToken_error",
+        "checkSToken_invoke",
+        "checkSToken_response",
+        "getClientConfig",
+        "getDeviceInfo",
+        "getDownloadTasksProgress",
+        "getMediaInfo",
+        "getOfflineSongList",
+        "getSettings",
+        "getSongDownloadProgress",
+        "getThirdpartyLoginInfo",
+        "init_error",
+        "init_invoke",
+        "init_missing_agreement_urls",
+        "saveBase64File",
+        "saveMediaEdit",
+        "sendWebPlayerControlCmd",
+        "showFileDirectoryPicker",
+        "showThirdPartyQuickLoginPanel",
+        "startClientApp",
+        "startDownloadTasks",
+        "startMediaDownload",
+        "startMediaEdit",
+        "startSongDownload",
+        "stopMediaDownload",
+        "stopMediaEdit",
+        "updateExtraHttpHeaders",
+        "updateSettings"
+      ]
+    },
+    "invoke_channel": {
+      "js_entry": "window.ToyPianistClient.invoke(method,arg)",
+      "methods": [
+        "addCollectionItem",
+        "ambienceEnded",
+        "collectionPlay",
+        "collectionStop",
+        "eventTrack",
+        "exitApp",
+        "hideWindow",
+        "minimizeWindow",
+        "notifyLogout",
+        "openDirectory",
+        "openInBrowser",
+        "restartApp",
+        "revealFileInExplorer",
+        "sendRenderConsoleMessage",
+        "sendRenderVolumeControl",
+        "startChat",
+        "startInstrumental",
+        "startPlaysing",
+        "startSolo",
+        "toggleRenderLog",
+        "updateMailReddot",
+        "updateRoute"
+      ]
+    },
+    "event_channel": {
+      "js_entry": "window.ToyPianistClient.addEventListener(event,handler)",
+      "native_to_web_events": [
+        "ambienceControl",
+        "collectionPlayDone",
+        "mediaDownloadProgress",
+        "mediaEditProgress",
+        "renderPlayerStatus",
+        "requestAppAction",
+        "requestChangeRoute",
+        "requestShowToast",
+        "systemResumed",
+        "uploadPerformance",
+        "webPlayerControl"
+      ],
+      "throttled_300ms": [
+        "renderPlayerStatus",
+        "mediaDownloadProgress",
+        "mediaEditProgress"
+      ]
+    },
+    "high_frequency_actions_logged_10pct": [
+      "getSongDownloadProgress",
+      "getDownloadTasksProgress",
+      "sendWebPlayerControlCmd"
+    ]
+  },
+  "api": {
+    "base": "appConf.toyApiUrl + '/toy'",
+    "headers": {
+      "x-token": "toy__+base64({aid,token})",
+      "x-uid": "uid",
+      "x-platform": "pc_lite",
+      "x-rpc-device_fp": "deviceFP",
+      "x-rpc-device_id": "apiHeaders.x-device_id",
+      "x-rpc-client_type": "apiHeaders.x-client_type",
+      "signSalt": "HMAC signing (server config)"
+    },
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/getMusicTypeInfo"
+      },
+      {
+        "method": "GET",
+        "path": "/getPreferenceSurvey"
+      },
+      {
+        "method": "GET",
+        "path": "/getSongStats"
+      },
+      {
+        "method": "GET",
+        "path": "/getUserInfo"
+      },
+      {
+        "method": "GET",
+        "path": "/letter/detail"
+      },
+      {
+        "method": "GET",
+        "path": "/letter/list"
+      },
+      {
+        "method": "GET",
+        "path": "/letter/unread_count"
+      },
+      {
+        "method": "GET",
+        "path": "/midi/batchGetResult"
+      },
+      {
+        "method": "GET",
+        "path": "/midi/getGenerateResult"
+      },
+      {
+        "method": "GET",
+        "path": "/midi/listJobs"
+      },
+      {
+        "method": "GET",
+        "path": "/searchPerformances"
+      },
+      {
+        "method": "GET",
+        "path": "/searchPlaylist"
+      },
+      {
+        "method": "GET",
+        "path": "/searchSongs"
+      },
+      {
+        "method": "GET",
+        "path": "/searchUserSongs"
+      },
+      {
+        "method": "POST",
+        "path": "/addPerformance"
+      },
+      {
+        "method": "POST",
+        "path": "/addToPlaylist"
+      },
+      {
+        "method": "POST",
+        "path": "/createFeedback"
+      },
+      {
+        "method": "POST",
+        "path": "/delFromPlaylist"
+      },
+      {
+        "method": "POST",
+        "path": "/delPerformance"
+      },
+      {
+        "method": "POST",
+        "path": "/deleteUserSong"
+      },
+      {
+        "method": "POST",
+        "path": "/editPerformance"
+      },
+      {
+        "method": "POST",
+        "path": "/editProfile"
+      },
+      {
+        "method": "POST",
+        "path": "/genObjectUploadUrl"
+      },
+      {
+        "method": "POST",
+        "path": "/generateShareToken"
+      },
+      {
+        "method": "POST",
+        "path": "/letter/resend"
+      },
+      {
+        "method": "POST",
+        "path": "/letter/send"
+      },
+      {
+        "method": "POST",
+        "path": "/letter/share"
+      },
+      {
+        "method": "POST",
+        "path": "/midi/cancelGenerate"
+      },
+      {
+        "method": "POST",
+        "path": "/midi/deleteJob"
+      },
+      {
+        "method": "POST",
+        "path": "/midi/generate"
+      },
+      {
+        "method": "POST",
+        "path": "/midi/importShareCode"
+      },
+      {
+        "method": "POST",
+        "path": "/signIn"
+      },
+      {
+        "method": "POST",
+        "path": "/submitPreferenceSurvey"
+      }
+    ]
+  },
+  "appconf_keys": [
+    "globalGatewayUrl",
+    "otelAuthCredential",
+    "otelService",
+    "passportUrl",
+    "webAccountHost",
+    "region",
+    "signSalt",
+    "toyApiUrl",
+    "toyWsUrl",
+    "trackingUrl"
+  ],
+  "appinfo_keys": [
+    "BundleId",
+    "Channel",
+    "ClientType",
+    "Company",
+    "ConfigVersion",
+    "DisplayName",
+    "Language",
+    "Product",
+    "ShowDebugPanel"
+  ],
+  "ui_routes": [
+    "collection",
+    "feedback",
+    "history",
+    "login",
+    "mode-select",
+    "settings",
+    "share",
+    "studio",
+    "survey",
+    "user-info"
+  ],
+  "encrypted_files": [
+    "conf.app.dat",
+    "songlist.dat",
+    "appstore.dat",
+    "usersettings.dat",
+    "eventtrack.dat"
+  ],
+  "debug": {
+    "showDebugPanel_trigger": "settings 页 3s 内连点 10 次",
+    "webplayer_dev_hook": "window.sendCmd({cmd:'play',url})"
+  }
+}
